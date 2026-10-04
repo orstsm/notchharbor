@@ -23,9 +23,12 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5, verified upstream
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - name: Check credentials and action pins
+        run: python3 scripts/security_check.py --history
       - name: Validate version and release notes
         run: zsh package-community.sh "$GITHUB_REF_NAME" --validate-only
       - name: Run regression tests

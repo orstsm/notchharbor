@@ -10,3 +10,21 @@ dist/
 # Private approval documents are retained outside the public repository.
 THIRD_PARTY_NOTICES.md
 Resources/Licenses/
+
+# Local credentials must never become commit candidates or source ZIP inputs.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keychain
+*.keychain-db
+*.mobileprovision
+.netrc
+credentials.json
+secrets.json
+secrets.yml
+secrets.yaml
+__pycache__/
+*.pyc

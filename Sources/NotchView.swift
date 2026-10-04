@@ -12,32 +12,45 @@ private let mechaKeysIcon: NSImage = {
 struct NotchView: View {
     @ObservedObject var model: ShelfModel
     @ObservedObject var appDelegate: AppDelegate
+    @ObservedObject var preferences: HarborPreferences
+    var isIsland = true
 
     var body: some View {
         ZStack(alignment: .top) {
             Color.black
 
-            if model.isExpanded {
-                Group {
+            if isIsland && !model.isExpanded && model.showsNowPlaying {
+                CollapsedSpotifyView(controller: appDelegate.spotify, physicalWidth: model.physicalNotchWidth)
+            }
+
+            if model.isExpanded || !isIsland {
+                VStack(spacing: 12) {
+                  Group {
                     switch model.activePage {
                     case .controls:
-                        controlsPage
+                        ScrollView { controlsPage }
                     case .settings:
-                        settingsPage
+                        Button("Open Settings…") { appDelegate.showSettings() }
                     case .about:
                         aboutPage
+                    case .music:
+                        if preferences.spotifyEnabled { ScrollView { SpotifyView(controller: appDelegate.spotify, library: appDelegate.spotifyLibrary) } }
+                    case .mirror:
+                        if preferences.mirrorEnabled { ScrollView { MirrorView(controller: appDelegate.mirror) } }
                     }
+                  }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                  bottomTabs
                 }
                 .padding(.horizontal, 16)
-                .padding(.top, 14)
+                .padding(.top, isIsland ? max(14, model.physicalNotchHeight + 6) : 14)
                 .padding(.bottom, 14)
                 .foregroundStyle(.white)
             }
         }
         .clipShape(
             NotchShape(
-                topCornerRadius: model.isExpanded ? 10 : 0,
-                bottomCornerRadius: model.isExpanded ? 22 : 14
+                topCornerRadius: isIsland && model.isExpanded ? 10 : 0,
+                bottomCornerRadius: isIsland ? (model.isExpanded ? 22 : 14) : 0
             )
         )
         // The panel owns the animated bounds, keeping drawing and hit testing aligned.
@@ -47,6 +60,33 @@ struct NotchView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .contentShape(Rectangle())
         .environment(\.colorScheme, .dark)
+        .tint(preferences.tint)
+        .onChange(of: preferences.spotifyEnabled) { enabled in
+            if !enabled && model.activePage == .music { model.activePage = .controls }
+        }
+        .onChange(of: preferences.mirrorEnabled) { enabled in
+            if !enabled { appDelegate.mirror.stop() }
+            if !enabled && model.activePage == .mirror { model.activePage = .controls }
+        }
+    }
+
+    private var bottomTabs: some View {
+        HStack(spacing: 12) {
+            tab("Keys", symbol: "keyboard", page: .controls)
+            if preferences.spotifyEnabled { tab("Music", symbol: "music.note", page: .music) }
+            if preferences.mirrorEnabled { tab("Mirror", symbol: "camera", page: .mirror) }
+            Spacer(minLength: 0)
+            Button { appDelegate.showSettings() } label: { Image(systemName: "gearshape") }
+                .help("NotchHarbor Settings")
+        }.buttonStyle(.plain).font(.caption.weight(.semibold))
+            .padding(.top, 10).overlay(alignment: .top) { Divider().overlay(.white.opacity(0.12)) }
+    }
+
+    private func tab(_ title: String, symbol: String, page: ShelfPage) -> some View {
+        Button { model.activePage = page } label: {
+            Label(title, systemImage: symbol).padding(8)
+                .background(model.activePage == page ? preferences.tint.opacity(0.25) : .clear, in: Capsule())
+        }.accessibilityAddTraits(model.activePage == page ? .isSelected : [])
     }
 
     private var controlsPage: some View {
@@ -82,7 +122,7 @@ struct NotchView: View {
         HStack(spacing: 8) {
             Image(systemName: "keyboard.fill")
                 .font(.title3)
-                .foregroundStyle(.red)
+                .foregroundStyle(preferences.tint)
 
             Text("NotchHarbor")
                 .font(.headline.weight(.bold))
@@ -97,7 +137,7 @@ struct NotchView: View {
                 .foregroundStyle(statusColor)
 
             Button {
-                model.activePage = .settings
+                appDelegate.showSettings()
             } label: {
                 Image(systemName: "gearshape.fill")
                     .frame(width: 22, height: 22)
@@ -203,7 +243,7 @@ struct NotchView: View {
             .frame(maxWidth: .infinity)
             .frame(height: 28)
             .background(
-                isSelected ? Color.red : Color.clear,
+                isSelected ? preferences.tint : Color.clear,
                 in: RoundedRectangle(cornerRadius: 8)
             )
             .contentShape(Rectangle())
@@ -222,7 +262,8 @@ struct NotchView: View {
                     get: { appDelegate.volume },
                     set: { appDelegate.setVolume($0) }
                 ),
-                isEnabled: appDelegate.soundEnabled
+                isEnabled: appDelegate.soundEnabled,
+                tint: preferences.tint
             )
 
             Text("\(Int(appDelegate.volume * 100))%")
@@ -277,141 +318,6 @@ struct NotchView: View {
         .font(.caption2)
     }
 
-    private var settingsPage: some View {
-        VStack(spacing: 12) {
-            HStack {
-                Button {
-                    model.activePage = .controls
-                } label: {
-                    Label("Back", systemImage: "chevron.left")
-                }
-                .buttonStyle(.plain)
-
-                Spacer()
-                Text("NotchHarbor Settings")
-                    .font(.headline.weight(.bold))
-                Spacer()
-
-                Button {
-                    model.closeExplicitly()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .frame(width: 24, height: 20)
-                }
-                .buttonStyle(.plain)
-            }
-
-            ScrollView {
-                VStack(spacing: 12) {
-                    VStack(spacing: 0) {
-                        settingToggle(
-                            "Launch at Login",
-                            value: appDelegate.launchAtLogin,
-                            action: appDelegate.setLaunchAtLogin
-                        )
-                        Divider().overlay(.white.opacity(0.1))
-                        settingToggle(
-                            "Use Menu Bar Instead of Island",
-                            value: appDelegate.showsMenuBarIcon,
-                            action: appDelegate.setShowsMenuBarIcon
-                        )
-                        Divider().overlay(.white.opacity(0.1))
-                        settingToggle(
-                            "Mute while microphone is active",
-                            value: appDelegate.muteDuringCalls,
-                            action: appDelegate.setMuteDuringCalls
-                        )
-                    }
-                    .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 14))
-
-                    VStack(spacing: 0) {
-                        settingToggle(
-                            "Subtle pitch variation",
-                            value: appDelegate.pitchVariationEnabled,
-                            action: appDelegate.setPitchVariationEnabled
-                        )
-                        Divider().overlay(.white.opacity(0.1))
-                        settingToggle(
-                            "Typing-speed dynamics",
-                            value: appDelegate.typingDynamicsEnabled,
-                            action: appDelegate.setTypingDynamicsEnabled
-                        )
-                        Divider().overlay(.white.opacity(0.1))
-                        settingToggle(
-                            "Suppress held-key repeats",
-                            value: appDelegate.suppressKeyRepeat,
-                            action: appDelegate.setSuppressKeyRepeat
-                        )
-                        Divider().overlay(.white.opacity(0.1))
-                        settingToggle(
-                            "Press-and-release sounds",
-                            value: appDelegate.releaseSoundsEnabled,
-                            action: appDelegate.setReleaseSoundsEnabled
-                        )
-                    }
-                    .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 14))
-
-                    VStack(spacing: 0) {
-                        Button {
-                            appDelegate.importCustomSoundPack()
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "waveform.badge.plus")
-                                    .foregroundStyle(.red)
-                                Text("Import Custom Sound Pack…")
-                                    .font(.callout.weight(.semibold))
-                                Spacer()
-                            }
-                            .padding(12)
-                        }
-                        .buttonStyle(.plain)
-                        Divider().overlay(.white.opacity(0.1))
-                        Button {
-                            model.activePage = .about
-                        } label: {
-                            HStack(spacing: 10) {
-                                Image(systemName: "info.circle.fill")
-                                    .foregroundStyle(.red)
-                                Text("About NotchHarbor & Features")
-                                    .font(.callout.weight(.semibold))
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .font(.caption.weight(.bold))
-                                    .foregroundStyle(.white.opacity(0.45))
-                            }
-                            .padding(12)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    .background(.white.opacity(0.075), in: RoundedRectangle(cornerRadius: 14))
-
-                    UpdateSettingsView(checker: appDelegate.updateChecker)
-                }
-                .padding(.trailing, 4)
-            }
-
-            HStack {
-                Text("Version \(appDelegate.version)")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.38))
-                Spacer()
-                Button("Quit NotchHarbor", role: .destructive) {
-                    NSApplication.shared.terminate(nil)
-                }
-                .buttonStyle(.bordered)
-            }
-        }
-    }
-
-    private func settingToggle(
-        _ title: String,
-        value: Bool,
-        action: @escaping (Bool) -> Void
-    ) -> some View {
-        Toggle(title, isOn: Binding(get: { value }, set: action))
-            .toggleStyle(.switch)
-            .padding(12)
-    }
 
     private var aboutPage: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -455,6 +361,12 @@ struct NotchView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 11) {
+                    featureRow(icon: "music.note", title: "Spotify Desktop controls",
+                               description: "A compact player and clickable Spotify icon. Only confirmed playback on this Mac decorates the collapsed island; paused tracks remain inside Music. Optional playlists use separate Spotify sign-in with renewal access in Keychain. Playback uses events, not polling.")
+                    featureRow(icon: "camera.fill", title: "Private camera mirror",
+                               description: "Start a circular mirror when needed. No recording, microphone capture or uploads. Closing, tab changes and sleep stop the camera.")
+                    featureRow(icon: "paintpalette.fill", title: "Make the island yours",
+                               description: "A separate settings window provides accent, width, animation, click-only opening and adjustable hover/close delays.")
                     featureRow(
                         icon: "info.circle.fill",
                         title: "Community build — not notarized",
@@ -557,7 +469,7 @@ struct NotchView: View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: icon)
                 .frame(width: 18)
-                .foregroundStyle(.red)
+                .foregroundStyle(preferences.tint)
                 .font(.caption)
 
             VStack(alignment: .leading, spacing: 2) {
@@ -608,6 +520,7 @@ struct NotchView: View {
 private struct VolumeLevelSlider: View {
     @Binding var value: Double
     let isEnabled: Bool
+    let tint: Color
 
     var body: some View {
         GeometryReader { geometry in
@@ -620,7 +533,7 @@ private struct VolumeLevelSlider: View {
                     .frame(height: 6)
 
                 Capsule()
-                    .fill(Color.red)
+                    .fill(tint)
                     .frame(width: max(3, geometry.size.width * value), height: 6)
 
                 Circle()

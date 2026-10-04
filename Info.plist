@@ -19,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>2.15.0</string>
+	<string>2.17.1</string>
     <key>CFBundleVersion</key>
-	<string>32</string>
+	<string>36</string>
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
     <key>LSApplicationCategoryType</key>
@@ -36,6 +36,10 @@
     <string>NotchHarbor needs Input Monitoring access to play sounds for keyboard and mouse button events in other apps.</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>NotchHarbor uses the camera only when you start the mirror. No video is recorded or uploaded.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>NotchHarbor controls Spotify Desktop and reads the current track when you connect from the Music tab.</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 NotchHarbor. All rights reserved.</string>
 </dict>

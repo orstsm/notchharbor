@@ -4,9 +4,17 @@ PROJECT_DIR="${0:A:h:h}"
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mechakeys-tests.XXXXXX")"
 trap 'rm -rf -- "$TEST_DIR"' EXIT
 cd "$PROJECT_DIR"
+PYTHONDONTWRITEBYTECODE=1 python3 Tests/SecurityGuardTests.py
+python3 scripts/security_check.py
 xcrun clang -fobjc-arc -fmodules -fmodules-cache-path="$TEST_DIR/cache" -c Sources/AudioSafety.m -o "$TEST_DIR/AudioSafety.o"
-xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/ShelfModel.swift Tests/HoverStateTests.swift -o "$TEST_DIR/hover"
+xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/HarborPreferences.swift Sources/ShelfModel.swift Tests/HoverStateTests.swift -o "$TEST_DIR/hover"
 "$TEST_DIR/hover"
+xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/HarborPreferences.swift Sources/PreviewActivation.swift Sources/ShelfModel.swift Sources/SpotifyArtwork.swift Sources/SpotifyLocalOutputMonitor.swift Sources/SpotifyController.swift Tests/HarborTests.swift -o "$TEST_DIR/harbor"
+"$TEST_DIR/harbor"
+xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/SpotifyArtwork.swift Sources/SpotifyLocalOutputMonitor.swift Sources/SpotifyController.swift Sources/SpotifyLibrary.swift Tests/SpotifyLibraryTests.swift -o "$TEST_DIR/spotify-library"
+"$TEST_DIR/spotify-library"
+xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/SpotifyLocalOutputMonitor.swift Tests/SpotifyLocalOutputTests.swift -o "$TEST_DIR/spotify-output"
+"$TEST_DIR/spotify-output"
 xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/WorkspaceLifecycleMonitor.swift Tests/WorkspaceLifecycleTests.swift -o "$TEST_DIR/workspace-lifecycle"
 "$TEST_DIR/workspace-lifecycle"
 xcrun swiftc -module-cache-path "$TEST_DIR/cache" -import-objc-header Sources/AudioSafety.h "$TEST_DIR/AudioSafety.o" Sources/GlobalKeyboardMonitor.swift Sources/CustomSoundPack.swift Sources/KeyboardAudioEngine.swift Sources/InputAudioController.swift Tests/AudioLifecycleTests.swift -o "$TEST_DIR/audio"
@@ -29,7 +37,7 @@ for INVALID_TAG in v0.0.0 v2.12.0-beta invalid; do
         exit 1
     fi
 done
-plutil -lint Info.plist PrivacyInfo.xcprivacy
+plutil -lint Info.plist PrivacyInfo.xcprivacy NotchHarbor.entitlements
 for PACK in holy-panda mx-blue mx-brown nk-cream typewriter; do
     PACK_DIR="Resources/Sounds/Community/$PACK"
     [[ -d "$PACK_DIR" ]] || { echo "Missing bundled sound profile: $PACK" >&2; exit 1; }

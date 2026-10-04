@@ -35,24 +35,7 @@ else
 fi
 
 SOURCE_ROOT="$SOURCE_STAGE/NotchHarbor"
-mkdir -p "$SOURCE_ROOT"
-cp -R "$PROJECT_DIR/Sources" "$SOURCE_ROOT/"
-cp -R "$PROJECT_DIR/docs" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/Info.plist" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/PrivacyInfo.xcprivacy" "$SOURCE_ROOT/"
-cp -R "$PROJECT_DIR/Resources" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/build.sh" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/install.sh" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/.gitignore" "$SOURCE_ROOT/"
-cp -R "$PROJECT_DIR/Tests" "$SOURCE_ROOT/"
-cp -R "$PROJECT_DIR/.github" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/release.sh" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/package-local.sh" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/package-community.sh" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR"/RELEASE-NOTES-*.md "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/README.md" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/INSTALL.md" "$SOURCE_ROOT/"
-cp "$PROJECT_DIR/SECURITY.md" "$SOURCE_ROOT/"
+python3 "$PROJECT_DIR/scripts/stage_source.py" "$SOURCE_ROOT"
 
 ditto -c -k --keepParent --norsrc --noextattr "$SOURCE_ROOT" "$SOURCE_ZIP"
 

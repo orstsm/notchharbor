@@ -18,6 +18,7 @@ if [[ "${2:-}" == "--validate-only" ]]; then
     exit 0
 fi
 # Community packages never depend on a developer certificate or local identity.
+python3 scripts/security_check.py --history
 MECHAKEYS_SIGNING_IDENTITY=- zsh build.sh --build-only
 APP_DIR="$PROJECT_DIR/.build/Products/NotchHarbor.app"
 codesign --verify --deep --strict "$APP_DIR"
@@ -31,6 +32,7 @@ STAGE="$(mktemp -d "${TMPDIR:-/tmp}/mechakeys-release-check.XXXXXX")"
 trap 'rm -rf -- "$STAGE"' EXIT
 ditto -x -k "dist/$ARCHIVE" "$STAGE"
 codesign --verify --deep --strict "$STAGE/NotchHarbor.app"
+python3 scripts/verify_bundle.py "$STAGE/NotchHarbor.app"
 cp INSTALL.md dist/INSTALL.md
 {
     printf '%s\n\n' '**Community build: ad-hoc signed, NOT notarized by Apple.** macOS may block opening or require per-app approval. Never disable system-wide security protections.'

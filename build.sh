@@ -3,7 +3,13 @@ set -euo pipefail
 
 PROJECT_DIR="${0:A:h}"
 BUILD_DIR="$PROJECT_DIR/.build"
-APP_DIR="$BUILD_DIR/Products/NotchHarbor.app"
+python3 "$PROJECT_DIR/scripts/security_check.py"
+mkdir -p "$BUILD_DIR/Products"
+# Only a freshly created staging directory is packaged. An old build remains
+# intact until the new bundle has passed all checks; installed apps are untouched.
+BUILD_STAGE="$(mktemp -d "$BUILD_DIR/release-stage.XXXXXX")"
+trap 'rm -rf -- "$BUILD_STAGE"' EXIT
+APP_DIR="$BUILD_STAGE/NotchHarbor.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -24,10 +30,7 @@ cp "$PROJECT_DIR/Info.plist" "$CONTENTS_DIR/Info.plist"
 cp "$PROJECT_DIR/PrivacyInfo.xcprivacy" "$RESOURCES_DIR/PrivacyInfo.xcprivacy"
 cp "$PROJECT_DIR/Resources/AppIcon.png" "$RESOURCES_DIR/AppIcon.png"
 cp "$PROJECT_DIR/Resources/AppIcon.icns" "$RESOURCES_DIR/AppIcon.icns"
-rm -rf "$RESOURCES_DIR/Sounds"
 cp -R "$PROJECT_DIR/Resources/Sounds" "$RESOURCES_DIR/Sounds"
-rm -rf "$RESOURCES_DIR/Licenses"
-rm -f "$RESOURCES_DIR/THIRD_PARTY_NOTICES.md"
 
 for arch in "${ARCHS[@]}"; do
     ARCH_BUILD_DIR="$BUILD_DIR/$arch"
@@ -66,6 +69,7 @@ xcrun lipo -create \
     -output "$MACOS_DIR/NotchHarbor"
 
 SIGNING_IDENTITY="${MECHAKEYS_SIGNING_IDENTITY:--}"
+python3 "$PROJECT_DIR/scripts/verify_bundle.py" "$APP_DIR" --unsigned
 
 # Files copied from development tools can carry provenance metadata that makes
 # Launch Services reject an otherwise valid local bundle. Strip it before the
@@ -78,6 +82,7 @@ if [[ "$SIGNING_IDENTITY" == "-" ]]; then
         --force \
         --deep \
         --options runtime \
+        --entitlements "$PROJECT_DIR/NotchHarbor.entitlements" \
         --sign - \
         "$APP_DIR"
 else
@@ -85,6 +90,7 @@ else
         --force \
         --deep \
         --options runtime \
+        --entitlements "$PROJECT_DIR/NotchHarbor.entitlements" \
         --timestamp \
         --sign "$SIGNING_IDENTITY" \
         "$APP_DIR"
@@ -93,6 +99,20 @@ fi
 plutil -lint "$CONTENTS_DIR/Info.plist" "$RESOURCES_DIR/PrivacyInfo.xcprivacy"
 codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 xcrun lipo -info "$MACOS_DIR/NotchHarbor"
+python3 "$PROJECT_DIR/scripts/verify_bundle.py" "$APP_DIR"
 
-echo "Built $APP_DIR"
+FINAL_APP="$BUILD_DIR/Products/NotchHarbor.app"
+if [[ -L "$FINAL_APP" ]]; then
+    echo "Refusing to replace a symbolic-link build product." >&2
+    exit 1
+fi
+if [[ -e "$FINAL_APP" ]]; then
+    mv "$FINAL_APP" "$BUILD_STAGE/previous.bundle-backup"
+fi
+if ! mv "$APP_DIR" "$FINAL_APP"; then
+    [[ ! -e "$BUILD_STAGE/previous.bundle-backup" ]] || mv "$BUILD_STAGE/previous.bundle-backup" "$FINAL_APP"
+    exit 1
+fi
+
+echo "Built $FINAL_APP"
 echo "Builds never replace the installed app. Quit NotchHarbor, then run: zsh install.sh"

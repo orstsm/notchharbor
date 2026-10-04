@@ -6,20 +6,27 @@ enum ShelfPage {
     case controls
     case settings
     case about
+    case music
+    case mirror
 
     var expandedSize: CGSize {
         switch self {
-        case .controls: return CGSize(width: 420, height: 340)
+        case .controls: return CGSize(width: 420, height: 380)
         case .settings: return CGSize(width: 440, height: 600)
         case .about: return CGSize(width: 440, height: 460)
+        case .music: return CGSize(width: 620, height: 330)
+        case .mirror: return CGSize(width: 420, height: 420)
         }
     }
 }
 
 @MainActor
 final class ShelfModel: ObservableObject {
+    let preferences: HarborPreferences
     @Published var isExpanded = false
     @Published var activePage: ShelfPage = .controls
+    @Published var showsNowPlaying = false
+    @Published var hasSpotifyTrack = false
     @Published private(set) var isVisible: Bool
     @Published private(set) var physicalNotchWidth: CGFloat = 185
     @Published private(set) var physicalNotchHeight: CGFloat = 34
@@ -32,7 +39,8 @@ final class ShelfModel: ObservableObject {
     private var requiresPointerExit = false
     private(set) var isManuallyOpened = false
 
-    init() {
+    init(preferences: HarborPreferences? = nil) {
+        self.preferences = preferences ?? HarborPreferences()
         isVisible = true
         UserDefaults.standard.set(true, forKey: "isShelfVisible")
     }
@@ -70,8 +78,8 @@ final class ShelfModel: ObservableObject {
         enteredAt = nil
         exitedAt = nil
         guard !isExpanded else { return }
-        activePage = .controls
         isExpanded = true
+        activePage = hasSpotifyTrack ? .music : .controls
     }
 
     func close() {
@@ -117,8 +125,9 @@ final class ShelfModel: ObservableObject {
 
             if isExpanded { return }
 
+            guard preferences.openOnHover else { enteredAt = nil; return }
             if enteredAt == nil { enteredAt = now }
-            if now - (enteredAt ?? now) >= Self.hoverDelay { open() }
+            if now - (enteredAt ?? now) >= preferences.openingDelay { open() }
         } else {
             enteredAt = nil
 
@@ -128,7 +137,7 @@ final class ShelfModel: ObservableObject {
             if isManuallyOpened { return }
 
             if exitedAt == nil { exitedAt = now }
-            if now - (exitedAt ?? now) >= 0.28 { close() }
+            if now - (exitedAt ?? now) >= preferences.closingDelay { close() }
         }
     }
 }

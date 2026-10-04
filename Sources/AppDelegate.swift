@@ -4,6 +4,15 @@ import Combine
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+    let preferences = HarborPreferences()
+    let spotify = SpotifyController()
+    let spotifyLibrary = SpotifyLibrary()
+    let mirror = MirrorController()
+    lazy var shelfModel = ShelfModel(preferences: preferences)
+    private var settingsController: HarborSettingsController?
+    private var mediaSleepObserver: NSObjectProtocol?
+    private var mediaWakeObserver: NSObjectProtocol?
+    private var mediaSubscriptions = Set<AnyCancellable>()
     let updateChecker = UpdateChecker(currentVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0")
     var version: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development" }
     @Published private(set) var soundEnabled: Bool
@@ -83,7 +92,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var userSoundEnabled: Bool
 
     private var notchWindowController: NotchWindowController?
-    private var shelfModel: ShelfModel?
     private var menuBarController: MenuBarController?
     private var lifecycleMonitor: WorkspaceLifecycleMonitor?
     private var systemSleeping = false
@@ -138,6 +146,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Publishers.CombineLatest(spotify.$snapshot, spotify.$localOutput).sink { [weak self] snapshot, output in
+            guard let self else { return }
+            self.shelfModel.hasSpotifyTrack = self.preferences.spotifyEnabled && snapshot != nil
+            self.shelfModel.showsNowPlaying = SpotifyIslandPolicy.shouldShow(enabled: self.preferences.spotifyEnabled, playing: snapshot?.playing == true, localOutput: output)
+        }.store(in: &mediaSubscriptions)
+        preferences.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in self?.updateIslandMusic() }
+        }.store(in: &mediaSubscriptions)
+        mediaSleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                self?.mirror.stop()
+                self?.spotify.setSuspended(true)
+                self?.spotifyLibrary.cancel()
+                self?.shelfModel.close()
+                self?.menuBarController?.dismiss()
+            }
+        }
+        mediaWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.systemSleeping else { return }
+                self.spotify.setSuspended(false)
+            }
+        }
         updateChecker.start()
         LaunchAtLoginManager.hardenExistingRegistration()
         refreshLaunchAtLoginStatus()
@@ -193,8 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         bluetoothMonitor.start()
         if muteDuringCalls { microphoneMonitor.start() }
 
-        let shelf = ShelfModel()
-        self.shelfModel = shelf
+        let shelf = shelfModel
         shelf.setVisible(!showsMenuBarIcon)
         shelf.start()
 
@@ -228,10 +258,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let mediaSleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(mediaSleepObserver) }
+        if let mediaWakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(mediaWakeObserver) }
+        mediaSubscriptions.removeAll()
+        mirror.stop()
+        spotify.stop()
+        spotifyLibrary.cancel()
         updateChecker.stop()
         lifecycleMonitor?.stop()
         menuBarController?.setVisible(false)
-        shelfModel?.stop()
+        shelfModel.stop()
         notchWindowController?.stop()
         keyboardMonitor?.stop()
         accessCheckTimer?.invalidate()
@@ -245,18 +281,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         audioController?.playTestSound()
     }
 
+    func showSettings() {
+        mirror.stop()
+        shelfModel.closeExplicitly()
+        menuBarController?.dismiss()
+        if settingsController == nil { settingsController = HarborSettingsController(appDelegate: self) }
+        settingsController?.show()
+    }
+
+    func dismissFloatingControls() { menuBarController?.dismiss() }
+
     private func applyPresentationMode() {
+        mirror.stop()
+        spotify.disappear()
         // Create the alternate entry point before removing the old one.
         if showsMenuBarIcon {
             menuBarController?.setVisible(true)
-            shelfModel?.setVisible(false)
+            shelfModel.setVisible(false)
         } else {
-            shelfModel?.setVisible(true)
+            shelfModel.setVisible(true)
             menuBarController?.setVisible(false)
         }
+        updateIslandMusic()
+    }
+
+    private func updateIslandMusic() {
+        spotify.setIslandMonitoring(preferences.spotifyEnabled && !showsMenuBarIcon)
+        shelfModel.hasSpotifyTrack = preferences.spotifyEnabled && spotify.snapshot != nil
+        shelfModel.showsNowPlaying = SpotifyIslandPolicy.shouldShow(enabled: preferences.spotifyEnabled, playing: spotify.snapshot?.playing == true, localOutput: spotify.localOutput)
     }
 
     private func prepareForSleep() {
+        spotifyLibrary.cancel()
+        mirror.stop()
+        spotify.setSuspended(true)
+        shelfModel.close()
+        menuBarController?.dismiss()
         systemSleeping = true
         keyboardMonitor?.stop()
         keyboardMonitor = nil
@@ -269,6 +329,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
 
     private func recoverAfterWake() {
         systemSleeping = false
+        spotify.setSuspended(false)
         // Recreate the event tap even if the old object still existed. Also
         // clears held-key state when key-up was missed while the Mac slept.
         keyboardMonitor?.stop()

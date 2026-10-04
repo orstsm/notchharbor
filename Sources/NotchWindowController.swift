@@ -2,6 +2,10 @@ import AppKit
 import Combine
 import SwiftUI
 
+private final class FirstClickHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 @MainActor
 final class NotchWindowController {
     private let model: ShelfModel
@@ -35,7 +39,10 @@ final class NotchWindowController {
         )
 
         configurePanel()
-        let hostingView = NSHostingView(rootView: NotchView(model: model, appDelegate: appDelegate))
+        model.$isExpanded.removeDuplicates().sink { [weak appDelegate] expanded in
+            if expanded { appDelegate?.dismissFloatingControls() }
+        }.store(in: &subscriptions)
+        let hostingView = FirstClickHostingView(rootView: NotchView(model: model, appDelegate: appDelegate, preferences: model.preferences))
         // The controller owns window size. SwiftUI must not resize the panel
         // again in response to its intrinsic content size during a transition.
         hostingView.sizingOptions = []
@@ -56,6 +63,19 @@ final class NotchWindowController {
                 }
             }
             .store(in: &subscriptions)
+
+        model.$showsNowPlaying.removeDuplicates().sink { [weak self] _ in
+            self?.scheduleStateUpdate()
+        }.store(in: &subscriptions)
+
+        model.preferences.objectWillChange.sink { [weak self] _ in
+            self?.openTimer?.invalidate()
+            self?.openTimer = nil
+            self?.closeTimer?.invalidate()
+            self?.closeTimer = nil
+            self?.model.stop()
+            self?.scheduleStateUpdate()
+        }.store(in: &subscriptions)
 
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -198,12 +218,12 @@ final class NotchWindowController {
             reportHover(isInside)
         } else {
             // Include the topmost coordinate; CGRect.contains excludes maxY.
-            // The activation zone matches the physical notch, not the old
-            // expanded window that remains during the closing animation.
-            // No extra hover margin over adjacent menu items.
-            let isInside = mouse.x >= collapsedFrame.minX
-                && mouse.x <= collapsedFrame.maxX
-                && mouse.y >= collapsedFrame.minY
+            // Match the currently drawn collapsed notch, including the small
+            // now-playing wings. Never reuse the old expanded window bounds.
+            let activationFrame = targetFrame(expanded: false, page: .controls)
+            let isInside = mouse.x >= activationFrame.minX
+                && mouse.x <= activationFrame.maxX
+                && mouse.y >= activationFrame.minY
                 && mouse.y <= screen.frame.maxY
             reportHover(isInside)
         }
@@ -216,7 +236,7 @@ final class NotchWindowController {
             openTimer = nil
         } else if openTimer == nil {
             // One cancellable deadline; stationary intentional hover opens too.
-            let timer = Timer(timeInterval: ShelfModel.hoverDelay + 0.01, repeats: false) { [weak self] _ in
+            let timer = Timer(timeInterval: model.preferences.openingDelay + 0.01, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     self?.openTimer = nil
                     self?.checkMouseHover()
@@ -230,7 +250,7 @@ final class NotchWindowController {
             closeTimer = nil
         } else if closeTimer == nil {
             // One deadline after exit, including when the pointer stops moving.
-            let timer = Timer(timeInterval: 0.29, repeats: false) { [weak self] _ in
+            let timer = Timer(timeInterval: model.preferences.closingDelay + 0.01, repeats: false) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.closeTimer = nil
@@ -243,6 +263,10 @@ final class NotchWindowController {
     }
 
     private func handleMouseDownOutside() {
+        if model.isVisible && !model.isExpanded && targetFrame(expanded: false, page: .controls).contains(NSEvent.mouseLocation) {
+            model.openManually()
+            return
+        }
         guard model.isExpanded else { return }
         let mouse = NSEvent.mouseLocation
         if !panel.frame.contains(mouse) {
@@ -286,9 +310,10 @@ final class NotchWindowController {
         guard let screen = targetScreen else { return .zero }
         let size: CGSize
         if expanded {
-            size = page.expandedSize
+            size = CGSize(width: min(page.expandedSize.width + (model.preferences.wideLayout ? 80 : 0), screen.frame.width - 16),
+                          height: min(page.expandedSize.height, screen.visibleFrame.height))
         } else {
-            size = collapsedSize
+            size = CGSize(width: HarborLayout.collapsedWidth(physicalWidth: collapsedSize.width, playing: model.showsNowPlaying), height: collapsedSize.height)
         }
 
         return NSRect(
@@ -322,7 +347,7 @@ final class NotchWindowController {
         // can be canceled by sleep, display changes, or a presentation switch.
         panel.ignoresMouseEvents = !expanded || !model.isVisible || displayAsleep
         let animate = model.isVisible && panel.isVisible && panel.frame != .zero
-            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            && model.preferences.animate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animate ? (expanded ? 0.24 : 0.20) : 0
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)

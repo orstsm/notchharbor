@@ -12,6 +12,7 @@ FINAL_ZIP="$DIST_DIR/NotchHarbor-$VERSION.zip"
 : "${MECHAKEYS_NOTARY_PROFILE:?Set this to your notarytool keychain profile}"
 
 [[ "$MECHAKEYS_SIGNING_IDENTITY" != "-" ]] || { echo "Developer ID required" >&2; exit 1; }
+python3 "$PROJECT_DIR/scripts/security_check.py" --history
 MECHAKEYS_SIGNING_IDENTITY="$MECHAKEYS_SIGNING_IDENTITY" "$PROJECT_DIR/build.sh" --build-only
 
 mkdir -p "$DIST_DIR"
@@ -25,6 +26,7 @@ xcrun notarytool submit "$UPLOAD_ZIP" \
 xcrun stapler staple "$APP_DIR"
 xcrun stapler validate "$APP_DIR"
 spctl --assess --type execute --verbose=2 "$APP_DIR"
+python3 "$PROJECT_DIR/scripts/verify_bundle.py" "$APP_DIR"
 
 ditto -c -k --keepParent "$APP_DIR" "$FINAL_ZIP"
 rm -f "$UPLOAD_ZIP"
