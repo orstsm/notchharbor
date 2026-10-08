@@ -177,7 +177,7 @@ private struct SpotifyPlaylistPane: View {
                     .disabled(!library.connected || library.busy).help("Refresh playlists")
                 Button { showSetup.toggle() } label: { Image(systemName: "gearshape") }.help("Spotify library setup")
             }.buttonStyle(.plain)
-            if !library.connected || showSetup {
+            if !library.connected || library.needsCredentialAccess || showSetup {
                 SpotifyLibrarySetup(library: library)
             } else {
                 ScrollView {
@@ -216,9 +216,20 @@ struct SpotifyLibrarySetup: View {
                     Button(library.authorizing ? "Signing in…" : "Connect Library") { library.connect() }.disabled(library.busy)
                     if library.busy { Button("Cancel") { library.cancel() } }
                 }.font(.caption)
+                Button("Sign in without Keychain") { library.connect(saveInKeychain: false) }.disabled(library.busy).font(.caption)
             } else {
-                Text("Library connected. Renewal access is saved in macOS Keychain.").font(.caption)
-                Button("Disconnect Library") { library.disconnect() }.font(.caption)
+                if library.needsCredentialAccess {
+                    Button("Unlock Saved Playlists") { library.authorizeSavedAccess() }.disabled(library.busy)
+                    Button("Sign in without Keychain") { library.connect(saveInKeychain: false) }.disabled(library.busy)
+                    Text("Opening the app never requests a Keychain password. Unlock is optional; session-only sign-in lasts until you quit.").font(.caption2).foregroundStyle(.secondary)
+                } else {
+                    Text("Library available for this session.").font(.caption)
+                }
+                if library.hasUnsavedAccess {
+                    Button("Save Access in Keychain…") { library.rememberAccess() }.disabled(library.busy).font(.caption)
+                    Text("Renewed access is in memory only. Save it if you want to unlock it after restarting; saving may ask for your Mac password.").font(.caption2).foregroundStyle(.secondary)
+                }
+                Button("Disconnect Library") { library.disconnect() }.disabled(library.busy).font(.caption)
             }
             if !library.message.isEmpty { Text(library.message).font(.caption2).foregroundStyle(.secondary).lineLimit(4) }
             Link("Spotify developer setup ↗", destination: URL(string: "https://developer.spotify.com/dashboard")!).font(.caption2)

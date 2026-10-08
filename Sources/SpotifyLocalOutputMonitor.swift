@@ -14,99 +14,179 @@ enum SpotifyIslandPolicy {
     }
 }
 
-/// Reads audio-process run-state only, never samples, captures or taps audio.
-/// Spotify's scripting state can describe a remote Connect device. Require
-/// Spotify-owned output on this Mac before decorating the collapsed island.
+struct SpotifyOutputProperty: Hashable {
+    let object: AudioObjectID
+    let selector: AudioObjectPropertySelector
+    let topology: Bool
+}
+
+/// Injected HAL boundary for notification-storm and blocked-driver regressions.
+struct SpotifyOutputBackend {
+    var properties: () -> Set<SpotifyOutputProperty>
+    var read: () -> SpotifyLocalOutputState
+    var subscribe: (SpotifyOutputProperty, @escaping () -> Void) -> (() -> Void)?
+}
+
+/// Only this small lock is touched from listener callbacks and the UI. Never
+/// hold it across HAL calls. At most one coalesced evaluation is queued.
+private final class SpotifyOutputGate {
+    private let lock = NSLock()
+    private var active = false
+    private var generation = 0
+    private var pending = false
+    private var topology = false
+    func activate() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard !active else { return false }
+        active = true; generation += 1
+        return true
+    }
+    func invalidate() {
+        lock.lock(); defer { lock.unlock() }
+        active = false; generation += 1; pending = false; topology = false
+    }
+    func request(topology changed: Bool) -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        guard active else { return nil }
+        topology = topology || changed
+        guard !pending else { return nil }
+        pending = true
+        return generation
+    }
+    func take(_ ticket: Int) -> Bool? {
+        lock.lock(); defer { lock.unlock() }
+        guard active, generation == ticket else { return nil }
+        let result = topology
+        topology = false; pending = false
+        return result
+    }
+    func current(_ ticket: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return active && generation == ticket
+    }
+}
+
+/// Event-driven local-output detection. Stable subscriptions and asynchronous
+/// teardown prevent the listener rebuild loop / main-thread sleep hang in 2.17.1.
 final class SpotifyLocalOutputMonitor {
     private let queue = DispatchQueue(label: "com.notchharbor.spotify-output", qos: .utility)
-    private let queueKey = DispatchSpecificKey<Bool>()
+    private let gate = SpotifyOutputGate()
+    private let backend: SpotifyOutputBackend
     private let handler: (SpotifyLocalOutputState) -> Void
-    private var started = false
-    private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    private var listeners: [SpotifyOutputProperty: () -> Void] = [:]
     private var settleWork: DispatchWorkItem?
     private var last: SpotifyLocalOutputState?
 
-    init(handler: @escaping (SpotifyLocalOutputState) -> Void) {
+    init(backend: SpotifyOutputBackend? = nil, handler: @escaping (SpotifyLocalOutputState) -> Void) {
+        self.backend = backend ?? Self.liveBackend
         self.handler = handler
-        queue.setSpecific(key: queueKey, value: true)
     }
     func start() {
-        queue.async { [weak self] in
-            guard let self, !self.started else { return }
-            self.started = true
-            self.rebuild()
-            self.publish()
-        }
+        guard gate.activate() else { return }
+        refresh()
     }
     func refresh() {
-        queue.async { [weak self] in self?.evaluateEvent(rebuild: true) }
+        schedule(topology: true)
     }
     func stop() {
-        let cleanup = {
-            self.started = false
+        // Invalidate immediately; never wait for an audio-driver queue from UI.
+        gate.invalidate()
+        queue.async { [self] in
             self.settleWork?.cancel()
             self.settleWork = nil
             self.removeListeners()
             self.last = nil
         }
-        if DispatchQueue.getSpecific(key: queueKey) == true { cleanup() }
-        else { queue.sync(execute: cleanup) }
     }
-    deinit { stop() }
+    deinit {
+        gate.invalidate()
+        settleWork?.cancel()
+        // No self capture and no synchronous dispatch from deinit. Any active
+        // evaluation retains self, so this snapshot cannot race with mutation.
+        let cleanup = Array(listeners.values)
+        queue.async { cleanup.forEach { $0() } }
+    }
 
-    private func evaluateEvent(rebuild: Bool) {
-        guard started else { return }
-        if rebuild { self.rebuild() }
-        publish()
-        // One bounded settling read for HAL/Spotify transition ordering, not a
-        // recurring timer. Device-global events supplement per-process events.
+    private func schedule(topology: Bool) {
+        guard let ticket = gate.request(topology: topology) else { return }
+        queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.evaluate(ticket)
+        }
+    }
+    private func evaluate(_ ticket: Int) {
+        guard let topology = gate.take(ticket) else { return }
+        if topology { reconcile(ticket) }
+        publish(ticket)
+        guard gate.current(ticket) else { return }
         settleWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.started else { return }
-            self.publish()
+            self?.publish(ticket)
         }
         settleWork = work
         queue.asyncAfter(deadline: .now() + 0.5, execute: work)
     }
-    private func publish() {
-        guard started else { return }
-        let current = Self.readState()
-        guard current != last else { return }
+    private func publish(_ ticket: Int) {
+        guard gate.current(ticket) else { return }
+        let current = backend.read()
+        guard gate.current(ticket), current != last else { return }
         last = current
         handler(current)
     }
-    private func rebuild() {
-        removeListeners()
-        guard #available(macOS 14.2, *) else { return }
-        let system = AudioObjectID(kAudioObjectSystemObject)
-        listen(system, kAudioHardwarePropertyProcessObjectList, rebuild: true)
-        listen(system, kAudioHardwarePropertyDevices, rebuild: true)
-        listen(system, kAudioHardwarePropertyDefaultOutputDevice, rebuild: true)
-        for process in Self.spotifyProcesses() ?? [] {
-            listen(process, kAudioProcessPropertyIsRunningOutput)
-            listen(process, kAudioProcessPropertyIsRunning)
-            listen(process, kAudioProcessPropertyDevices, rebuild: true)
+    private func reconcile(_ ticket: Int) {
+        let desired = backend.properties()
+        guard gate.current(ticket) else { return }
+        for key in Set(listeners.keys).subtracting(desired) {
+            listeners.removeValue(forKey: key)?()
         }
-        for device in Self.ids(system, kAudioHardwarePropertyDevices) ?? [] {
-            listen(device, kAudioDevicePropertyDeviceIsRunningSomewhere)
-        }
-    }
-    private func listen(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, rebuild: Bool = false) {
-        var address = Self.address(selector)
-        guard AudioObjectHasProperty(object, &address) else { return }
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.evaluateEvent(rebuild: rebuild)
-        }
-        if AudioObjectAddPropertyListenerBlock(object, &address, queue, block) == noErr {
-            listeners.append((object, address, block))
+        for key in desired.subtracting(Set(listeners.keys)) {
+            guard gate.current(ticket) else { return }
+            if let cancel = backend.subscribe(key, { [weak self] in
+                // HAL callback only signals work; never adds/removes listeners.
+                self?.schedule(topology: key.topology)
+            }) { listeners[key] = cancel }
         }
     }
     private func removeListeners() {
-        for (object, original, block) in listeners {
-            var address = original
-            AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
-        }
+        let cleanup = Array(listeners.values)
         listeners.removeAll()
+        cleanup.forEach { $0() }
+    }
+
+    private static var liveBackend: SpotifyOutputBackend {
+        SpotifyOutputBackend(properties: properties, read: readState, subscribe: subscribe)
+    }
+    private static func properties() -> Set<SpotifyOutputProperty> {
+        guard #available(macOS 14.2, *) else { return [] }
+        var result = Set<SpotifyOutputProperty>()
+        func add(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, topology: Bool = false) {
+            result.insert(SpotifyOutputProperty(object: object, selector: selector, topology: topology))
+        }
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        add(system, kAudioHardwarePropertyProcessObjectList, topology: true)
+        add(system, kAudioHardwarePropertyDevices, topology: true)
+        add(system, kAudioHardwarePropertyDefaultOutputDevice, topology: true)
+        for process in Self.spotifyProcesses() ?? [] {
+            add(process, kAudioProcessPropertyIsRunningOutput)
+            add(process, kAudioProcessPropertyIsRunning)
+            add(process, kAudioProcessPropertyDevices, topology: true)
+        }
+        for device in Self.ids(system, kAudioHardwarePropertyDevices) ?? [] {
+            add(device, kAudioDevicePropertyDeviceIsRunningSomewhere)
+        }
+        return result
+    }
+    private static func subscribe(_ key: SpotifyOutputProperty, notify: @escaping () -> Void) -> (() -> Void)? {
+        var address = Self.address(key.selector)
+        guard AudioObjectHasProperty(key.object, &address) else { return nil }
+        // Keep callbacks off the management queue, with stable block identity
+        // and the same queue/block supplied to the matching removal.
+        let delivery = DispatchQueue.global(qos: .utility)
+        let block: AudioObjectPropertyListenerBlock = { _, _ in notify() }
+        guard AudioObjectAddPropertyListenerBlock(key.object, &address, delivery, block) == noErr else { return nil }
+        return {
+            var address = Self.address(key.selector)
+            AudioObjectRemovePropertyListenerBlock(key.object, &address, delivery, block)
+        }
     }
 
     static func readState() -> SpotifyLocalOutputState {

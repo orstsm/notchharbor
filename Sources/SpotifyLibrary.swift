@@ -45,11 +45,29 @@ private enum LibraryError: LocalizedError {
     var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
 }
 
+/// Keychain can wait for securityd or user approval after unlock/re-signing.
+/// Never perform these blocking calls on MainActor. Serialize mutations so a
+/// disconnect queued after a token save cannot be overtaken by that save.
+enum SpotifyCredentialWorker {
+    private static let queue = DispatchQueue(label: "com.notchharbor.spotify-keychain", qos: .utility)
+    static func perform<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                do { continuation.resume(returning: try work()) }
+                catch { continuation.resume(throwing: error) }
+            }
+        }
+    }
+}
+
 private enum SpotifyLibraryKeychain {
     static func query(_ client: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "com.notchharbor.spotify-library", kSecAttrAccount as String: client]
     }
-    static func read(_ client: String) -> String? {
+    static func read(_ client: String) async throws -> String? {
+        try await SpotifyCredentialWorker.perform { readBlocking(client) }
+    }
+    private static func readBlocking(_ client: String) -> String? {
         var request = query(client)
         request[kSecReturnData as String] = true
         request[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -57,7 +75,10 @@ private enum SpotifyLibraryKeychain {
         guard SecItemCopyMatching(request as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
         return String(data: data, encoding: .utf8)
     }
-    static func save(_ token: String, client: String) throws {
+    static func save(_ token: String, client: String) async throws {
+        try await SpotifyCredentialWorker.perform { try saveBlocking(token, client: client) }
+    }
+    private static func saveBlocking(_ token: String, client: String) throws {
         let data = Data(token.utf8)
         let result = SecItemUpdate(query(client) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if result == errSecSuccess { return }
@@ -67,7 +88,10 @@ private enum SpotifyLibraryKeychain {
         request[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         guard SecItemAdd(request as CFDictionary, nil) == errSecSuccess else { throw LibraryError.message("Could not save Spotify access in Keychain.") }
     }
-    static func delete(_ client: String) -> Bool {
+    static func delete(_ client: String) async throws -> Bool {
+        try await SpotifyCredentialWorker.perform { deleteBlocking(client) }
+    }
+    private static func deleteBlocking(_ client: String) -> Bool {
         let result = SecItemDelete(query(client) as CFDictionary)
         return result == errSecSuccess || result == errSecItemNotFound
     }
@@ -77,14 +101,23 @@ private enum SpotifyLibraryKeychain {
 /// Desktop credentials are read. All browser authorization is user initiated.
 @MainActor
 final class SpotifyLibrary: ObservableObject {
-    @Published var clientID = UserDefaults.standard.string(forKey: "harbor.spotifyClientID") ?? ""
+    @Published var clientID: String
     @Published private(set) var playlists: [SpotifyPlaylist] = []
     @Published private(set) var busy = false
-    @Published private(set) var connected = UserDefaults.standard.bool(forKey: "harbor.spotifyLibraryConnected")
+    @Published private(set) var connected: Bool
     @Published private(set) var message = "Connect your Spotify library to browse playlists."
     @Published private(set) var hasMore = false
     @Published private(set) var authorizing = false
-    private var storedClient: String { UserDefaults.standard.string(forKey: "harbor.spotifyClientID") ?? "" }
+    @Published private(set) var needsCredentialAccess = false
+    @Published private(set) var hasUnsavedAccess = false
+    // Legacy login Keychain can display UI even with no-authentication flags.
+    // Only explicit user actions may read/write it. Automatic renewal uses RAM.
+    private var refreshToken: String?
+    private var saveConnection = true
+    private let readCredential: (String) async throws -> String?
+    private let saveCredential: (String, String) async throws -> Void
+    private let defaults: UserDefaults
+    private var storedClient: String { defaults.string(forKey: "harbor.spotifyClientID") ?? "" }
     private var listener: NWListener?
     private var connections: [UUID: NWConnection] = [:]
     private var operation: Task<Void, Never>?
@@ -98,16 +131,27 @@ final class SpotifyLibrary: ObservableObject {
     private var refreshedAt = Date.distantPast
     private var retryAfter = Date.distantPast
 
+    init(defaults: UserDefaults = .standard,
+         readCredential: @escaping (String) async throws -> String? = { try await SpotifyLibraryKeychain.read($0) },
+         saveCredential: @escaping (String, String) async throws -> Void = { try await SpotifyLibraryKeychain.save($0, client: $1) }) {
+        self.defaults = defaults
+        self.clientID = defaults.string(forKey: "harbor.spotifyClientID") ?? ""
+        self.connected = defaults.bool(forKey: "harbor.spotifyLibraryConnected")
+        self.readCredential = readCredential
+        self.saveCredential = saveCredential
+    }
+
     func appear() {
         if connected && Date().timeIntervalSince(refreshedAt) > 300 { refresh() }
     }
 
-    func connect() {
+    func connect(saveInKeychain: Bool = true) {
         guard !busy else { return }
         let client = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard SpotifyLibrarySecurity.validClientID(client) else { message = "Enter the 32-character Client ID from your Spotify developer app—not its secret."; return }
         if connected && client != storedClient { message = "Disconnect the current library before changing Client ID."; return }
         cancel()
+        saveConnection = saveInKeychain
         do {
             verifier = try SpotifyLibrarySecurity.random()
             state = try SpotifyLibrarySecurity.random()
@@ -180,15 +224,22 @@ final class SpotifyLibrary: ObservableObject {
                 if callback.denied { self.fail("Spotify library access was not granted."); return }
                 guard let code = callback.code else { return }
                 let verifier = self.verifier
+                let saveConnection = self.saveConnection
                 self.operation = Task { [weak self] in
                     guard let self else { return }
                     do {
                         try await self.exchange(["grant_type": "authorization_code", "code": code, "redirect_uri": SpotifyLibrarySecurity.redirect, "client_id": client, "code_verifier": verifier], client: client, generation: token)
+                        if saveConnection, let renewal = self.refreshToken {
+                            try await self.saveCredential(renewal, client)
+                            guard self.generation == token, !Task.isCancelled else { return }
+                            self.hasUnsavedAccess = false
+                        }
                         guard self.generation == token, !Task.isCancelled else { return }
-                        UserDefaults.standard.set(client, forKey: "harbor.spotifyClientID")
-                        UserDefaults.standard.set(true, forKey: "harbor.spotifyLibraryConnected")
+                        self.defaults.set(client, forKey: "harbor.spotifyClientID")
+                        self.defaults.set(saveConnection, forKey: "harbor.spotifyLibraryConnected")
                         self.clientID = client
                         self.connected = true
+                        self.needsCredentialAccess = false
                         self.busy = false
                         self.verifier = ""
                         self.state = ""
@@ -218,22 +269,91 @@ final class SpotifyLibrary: ObservableObject {
         connections.removeAll()
     }
     private func fail(_ text: String) { cancel(); message = text }
+
+    /// The only saved-token read path. Opening Music, refresh, wake and pagination
+    /// never call this method. Refusal is not retried until the next button click.
+    func authorizeSavedAccess() {
+        guard connected, !busy else { return }
+        let token = generation
+        let client = storedClient
+        busy = true
+        message = "Approve the macOS Keychain prompt, or choose Deny and sign in without Keychain."
+        operation = Task { [weak self] in
+            guard let self, self.generation == token, !Task.isCancelled else { return }
+            do {
+                let saved = try await self.readCredential(client)
+                guard self.generation == token, !Task.isCancelled else { return }
+                guard let saved, !saved.isEmpty else { throw LibraryError.message("Saved access was not unlocked. You can sign in without Keychain instead.") }
+                self.refreshToken = saved
+                self.needsCredentialAccess = false
+                self.hasUnsavedAccess = false
+                self.busy = false
+                self.refresh()
+            } catch {
+                guard self.generation == token, !Task.isCancelled else { return }
+                self.busy = false
+                self.needsCredentialAccess = true
+                self.message = "Saved access was not unlocked. You can sign in without Keychain instead."
+            }
+        }
+    }
+
+    func rememberAccess() {
+        guard !busy, let renewal = refreshToken, hasUnsavedAccess else { return }
+        let token = generation
+        let client = storedClient
+        busy = true
+        message = "Saving library access. macOS may request Keychain approval."
+        operation = Task { [weak self] in
+            guard let self, self.generation == token, !Task.isCancelled else { return }
+            do {
+                try await self.saveCredential(renewal, client)
+                guard self.generation == token, !Task.isCancelled else { return }
+                self.defaults.set(true, forKey: "harbor.spotifyLibraryConnected")
+                self.hasUnsavedAccess = false
+                self.busy = false
+                self.message = "Library access saved."
+            } catch {
+                guard self.generation == token, !Task.isCancelled else { return }
+                self.busy = false
+                self.message = "Could not save access. Playlists remain available for this session."
+            }
+        }
+    }
     func disconnect() {
+        guard !busy else { return }
         cancel()
-        guard SpotifyLibraryKeychain.delete(storedClient) else { message = "Could not remove the saved credential from Keychain. Try again when unlocked."; return }
-        connected = false
-        UserDefaults.standard.set(false, forKey: "harbor.spotifyLibraryConnected")
-        playlists = []
-        hasMore = false
-        accessToken = nil
-        expiresAt = .distantPast
-        message = "Library disconnected. You can also revoke access in your Spotify account's Apps page."
+        let token = generation
+        let client = storedClient
+        busy = true
+        message = "Removing library access from Keychain…"
+        operation = Task { [weak self] in
+            let removed = (try? await SpotifyLibraryKeychain.delete(client)) == true
+            guard let self, self.generation == token, !Task.isCancelled else { return }
+            self.busy = false
+            guard removed else { self.message = "Could not remove the saved credential from Keychain. Try again when unlocked."; return }
+            self.connected = false
+            self.defaults.set(false, forKey: "harbor.spotifyLibraryConnected")
+            self.playlists = []
+            self.hasMore = false
+            self.accessToken = nil
+            self.refreshToken = nil
+            self.needsCredentialAccess = false
+            self.hasUnsavedAccess = false
+            self.expiresAt = .distantPast
+            self.message = "Library disconnected. You can also revoke access in your Spotify account's Apps page."
+        }
     }
 
     func refresh() { load(reset: true) }
     func loadMore() { if hasMore { load(reset: false) } }
     private func load(reset: Bool) {
         guard connected, !busy else { return }
+        guard refreshToken != nil || (accessToken != nil && expiresAt > Date().addingTimeInterval(60)) else {
+            needsCredentialAccess = true
+            message = "Playlists are locked. Unlock saved access or sign in without Keychain. Other controls still work."
+            return
+        }
         guard Date() >= retryAfter else { message = "Spotify requested a short wait before refreshing again."; return }
         busy = true
         message = "Loading playlists…"
@@ -243,7 +363,7 @@ final class SpotifyLibrary: ObservableObject {
             guard let self else { return }
             do {
                 if self.accessToken == nil || self.expiresAt < Date().addingTimeInterval(60) {
-                    guard let refresh = SpotifyLibraryKeychain.read(client) else { throw LibraryError.message("Saved library access is unavailable. Connect Library again.") }
+                    guard let refresh = self.refreshToken else { throw LibraryError.message("Unlock saved access to renew playlists.") }
                     try await self.exchange(["grant_type": "refresh_token", "refresh_token": refresh, "client_id": client], client: client, generation: token)
                 }
                 guard self.generation == token, !Task.isCancelled, let access = self.accessToken else { return }
@@ -291,8 +411,13 @@ final class SpotifyLibrary: ObservableObject {
         let reply = try JSONDecoder().decode(Token.self, from: data)
         guard self.generation == token, !Task.isCancelled else { throw CancellationError() }
         guard !reply.access_token.isEmpty else { throw LibraryError.message("Spotify returned invalid access. Connect again.") }
-        if let refresh = reply.refresh_token { try SpotifyLibraryKeychain.save(refresh, client: client) }
+        if let refresh = reply.refresh_token {
+            guard !refresh.isEmpty else { throw LibraryError.message("Spotify returned invalid renewal access.") }
+            if refresh != refreshToken { hasUnsavedAccess = true }
+            refreshToken = refresh
+        }
         else if values["grant_type"] == "authorization_code" { throw LibraryError.message("Spotify did not grant renewable library access. Connect again.") }
+        guard self.generation == token, !Task.isCancelled else { throw CancellationError() }
         accessToken = reply.access_token
         expiresAt = Date().addingTimeInterval(min(86400, max(0, reply.expires_in)))
     }
