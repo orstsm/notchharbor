@@ -9,6 +9,8 @@ python3 scripts/security_check.py
 xcrun clang -fobjc-arc -fmodules -fmodules-cache-path="$TEST_DIR/cache" -c Sources/AudioSafety.m -o "$TEST_DIR/AudioSafety.o"
 xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/HarborPreferences.swift Sources/ShelfModel.swift Tests/HoverStateTests.swift -o "$TEST_DIR/hover"
 "$TEST_DIR/hover"
+xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/PanelDismissalMonitor.swift Tests/PanelDismissalTests.swift -o "$TEST_DIR/panel-dismissal"
+"$TEST_DIR/panel-dismissal"
 xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/HarborPreferences.swift Sources/PreviewActivation.swift Sources/ShelfModel.swift Sources/SpotifyArtwork.swift Sources/SpotifyLocalOutputMonitor.swift Sources/SpotifyController.swift Tests/HarborTests.swift -o "$TEST_DIR/harbor"
 "$TEST_DIR/harbor"
 xcrun swiftc -module-cache-path "$TEST_DIR/cache" Sources/SpotifyArtwork.swift Sources/SpotifyLocalOutputMonitor.swift Sources/SpotifyController.swift Sources/SpotifyLibrary.swift Tests/SpotifyLibraryTests.swift -o "$TEST_DIR/spotify-library"

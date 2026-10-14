@@ -21,6 +21,11 @@ final class NotchWindowController {
     private var globalMouseDownMonitor: Any?
     private var globalMouseMoveMonitor: Any?
     private var localMouseMonitor: Any?
+    private var compactMouseMonitor: Any?
+    private let dismissalMonitor = PanelDismissalMonitor()
+    private var frameTransition = 0
+    private var collapseUntil: TimeInterval = 0
+    private var isCollapsing: Bool { ProcessInfo.processInfo.systemUptime < collapseUntil }
 
     private var collapsedSize = CGSize(width: 200, height: 38)
     private var targetScreen: NSScreen?
@@ -171,24 +176,38 @@ final class NotchWindowController {
             self?.checkMouseHover()
         }
         localMouseMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged,
-                       .leftMouseDown, .rightMouseDown]
+            matching: [.mouseMoved, .leftMouseDragged, .rightMouseDragged]
         ) { [weak self] event in
-            if event.type == .leftMouseDown || event.type == .rightMouseDown {
-                self?.handleMouseDownOutside()
-            } else {
-                self?.checkMouseHover()
-            }
+            self?.checkMouseHover()
             return event
         }
 
-        // Monitor clicks outside to collapse
+        updateCompactClickMonitors()
+        if model.isExpanded {
+            dismissalMonitor.start(window: panel) { [weak self] in self?.dismissExpandedPanel() }
+        }
+    }
+
+    private func updateCompactClickMonitors() {
+        if model.isExpanded || !model.isVisible || displayAsleep || isStopped {
+            if let globalMouseDownMonitor { NSEvent.removeMonitor(globalMouseDownMonitor) }
+            if let compactMouseMonitor { NSEvent.removeMonitor(compactMouseMonitor) }
+            globalMouseDownMonitor = nil
+            compactMouseMonitor = nil
+            return
+        }
+        guard globalMouseDownMonitor == nil, compactMouseMonitor == nil else { return }
         globalMouseDownMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.handleMouseDownOutside()
+            self?.handleCompactClick()
+        }
+        compactMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            self?.handleCompactClick()
+            return event
         }
     }
 
     private func removeMonitors() {
+        dismissalMonitor.stop()
         openTimer?.invalidate()
         openTimer = nil
         model.stop()
@@ -197,6 +216,8 @@ final class NotchWindowController {
 
         if let globalMouseDownMonitor { NSEvent.removeMonitor(globalMouseDownMonitor) }
         globalMouseDownMonitor = nil
+        if let compactMouseMonitor { NSEvent.removeMonitor(compactMouseMonitor) }
+        compactMouseMonitor = nil
         if let globalMouseMoveMonitor { NSEvent.removeMonitor(globalMouseMoveMonitor) }
         globalMouseMoveMonitor = nil
         if let localMouseMonitor { NSEvent.removeMonitor(localMouseMonitor) }
@@ -205,6 +226,11 @@ final class NotchWindowController {
 
     private func checkMouseHover() {
         guard model.isVisible, let screen = targetScreen else { return }
+        guard !isCollapsing else { return }
+        if model.isExpanded && dismissalMonitor.protectsInteraction(at: NSEvent.mouseLocation) {
+            reportHover(true)
+            return
+        }
         if !model.isExpanded && NSEvent.pressedMouseButtons != 0 {
             reportHover(false)
             return
@@ -262,16 +288,23 @@ final class NotchWindowController {
         }
     }
 
-    private func handleMouseDownOutside() {
-        if model.isVisible && !model.isExpanded && targetFrame(expanded: false, page: .controls).contains(NSEvent.mouseLocation) {
+    private func handleCompactClick() {
+        // This handler is only the compact notch's click-to-open
+        // entry point. Expanded dismissal has a separately scoped monitor.
+        if !isCollapsing && model.isVisible && !model.isExpanded && targetFrame(expanded: false, page: .controls).contains(NSEvent.mouseLocation) {
             model.openManually()
-            return
         }
+    }
+
+    private func dismissExpandedPanel() {
         guard model.isExpanded else { return }
-        let mouse = NSEvent.mouseLocation
-        if !panel.frame.contains(mouse) {
-            model.close()
-        }
+        openTimer?.invalidate()
+        openTimer = nil
+        closeTimer?.invalidate()
+        closeTimer = nil
+        panel.ignoresMouseEvents = true
+        collapseUntil = ProcessInfo.processInfo.systemUptime + 0.20
+        model.closeExplicitly()
     }
 
     private func selectScreenAndPosition() {
@@ -340,6 +373,15 @@ final class NotchWindowController {
 
         let frame = targetFrame(expanded: expanded, page: page)
         guard frame != .zero else { return }
+        updateCompactClickMonitors()
+
+        if expanded && model.isVisible && !displayAsleep {
+            dismissalMonitor.start(window: panel) { [weak self] in self?.dismissExpandedPanel() }
+        } else {
+            dismissalMonitor.stop()
+        }
+        frameTransition += 1
+        let transition = frameTransition
 
         // Never leave an expanded, transparent window waiting for an animation
         // callback. Collapsed windows cannot swallow another app's clicks.
@@ -348,10 +390,19 @@ final class NotchWindowController {
         panel.ignoresMouseEvents = !expanded || !model.isVisible || displayAsleep
         let animate = model.isVisible && panel.isVisible && panel.frame != .zero
             && model.preferences.animate && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let duration: TimeInterval = animate ? (expanded ? 0.24 : 0.20) : 0
+        // Bound suppression to the existing animation, without a new timer.
+        // A canceled completion must never leave the compact notch unclickable.
+        collapseUntil = !expanded && panel.frame != frame ? ProcessInfo.processInfo.systemUptime + duration : 0
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = animate ? (expanded ? 0.24 : 0.20) : 0
+            context.duration = duration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             panel.animator().setFrame(frame, display: true)
+        } completionHandler: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.frameTransition == transition else { return }
+                self.collapseUntil = 0
+            }
         }
         panel.contentView?.needsLayout = true
         panel.contentView?.layoutSubtreeIfNeeded()

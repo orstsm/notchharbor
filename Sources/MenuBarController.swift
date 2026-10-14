@@ -31,6 +31,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
     private let controlsSurface = HarborSurface()
     private let popoverSurface = HarborSurface()
     private var pageSubscription: AnyCancellable?
+    private let dismissalMonitor = PanelDismissalMonitor()
 
     init(appDelegate: AppDelegate) {
         controlsWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 640),
@@ -107,12 +108,14 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
         controlsWindow.center()
         NSApp.activate(ignoringOtherApps: true)
         controlsWindow.makeKeyAndOrderFront(nil)
+        monitorDismissal(of: controlsWindow)
     }
 
     @objc private func togglePopover() {
         if popover.isShown {
             popover.close()
         } else if let button = item?.button, button.window?.isVisible == true {
+            dismissalMonitor.stop()
             controlsSurface.visible = false
             controlsWindow.orderOut(nil)
             appDelegate?.shelfModel.activePage = .controls
@@ -128,6 +131,7 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
     }
 
     func dismiss() {
+        dismissalMonitor.stop()
         controlsSurface.visible = false
         popoverSurface.visible = false
         stopMedia()
@@ -153,6 +157,30 @@ final class MenuBarController: NSObject, NSPopoverDelegate, NSWindowDelegate {
             popover.contentSize = NSSize(width: popoverSurface.width, height: popoverSurface.height)
         }
     }
-    func popoverDidClose(_ notification: Notification) { popoverSurface.visible = false; stopMedia() }
-    func windowWillClose(_ notification: Notification) { controlsSurface.visible = false; stopMedia() }
+    private func monitorDismissal(of window: NSWindow) {
+        dismissalMonitor.start(window: window) { [weak self] in
+            self?.appDelegate?.shelfModel.closeExplicitly()
+            self?.dismiss()
+        }
+    }
+
+    func popoverDidShow(_ notification: Notification) {
+        if let window = popover.contentViewController?.view.window { monitorDismissal(of: window) }
+    }
+    func popoverDidClose(_ notification: Notification) {
+        popoverSurface.visible = false
+        // A delayed popover-close notification must not disarm a Controls
+        // window opened in the meantime (for example, a Finder reopen).
+        if !controlsSurface.visible {
+            dismissalMonitor.stop()
+            stopMedia()
+        }
+    }
+    func windowWillClose(_ notification: Notification) {
+        controlsSurface.visible = false
+        if !popoverSurface.visible {
+            dismissalMonitor.stop()
+            stopMedia()
+        }
+    }
 }

@@ -2,7 +2,7 @@
 
 Your Mac’s little control space — home of **MechaKeys** keyboard and mouse sounds.
 
-NotchHarbor is the new name for MechaKeys. Version 2.17.3 stops automatic Spotify Keychain prompts, with explicit saved-playlist unlock or session-only Spotify sign-in. It also includes the 2.17.2 sleep-time audio-listener and blocked-Keychain UI fixes. The collapsed indicator still appears only for playback on this Mac; paused tracks remain inside Music. The on-demand mirror, keyboard-sound engine and existing preferences are preserved. See the [rename and upgrade guide](docs/RENAMING.md).
+NotchHarbor is the new name for MechaKeys. Version 2.17.4 adds shared outside-click dismissal for the island, menu-bar popover and reopened Controls window, with menu/child-window protection and collapse-transition hover protection. It retains explicit Spotify Keychain unlock or session-only sign-in and the sleep-time audio-listener fixes. The collapsed indicator still appears only for playback on this Mac; paused tracks remain inside Music. The on-demand mirror, keyboard-sound engine and existing preferences are preserved. See the [rename and upgrade guide](docs/RENAMING.md) and [outside-click validation](docs/OUTSIDE-CLICK-VALIDATION.md).
 
 Pause over the notch to turn sounds on or off, choose a profile, change volume, or open settings. NotchHarbor is a standalone app: **NotchShelf and boringNotch are not required**. Turn on **Use Menu Bar Instead of Island** in Settings to use only the menu-bar icon; turn it off in the menu-bar controls to return to the island. The choice is remembered.
 
@@ -62,7 +62,7 @@ Building does not replace your installed app. The explicit installer uses your u
 
 ## Publish an update from GitHub Desktop
 
-Update the version and release notes, commit/push the changes, then create and push the matching version tag from **History** (for example `v2.17.3`). GitHub Actions tests, builds and publishes the universal community ZIP, installation instructions and checksums. Ordinary commits do not publish releases. Complete live Spotify library and overnight sleep/wake acceptance checks before publishing this version.
+Update the version and release notes, commit/push the changes, then create and push the matching version tag from **History** (for example `v2.17.4`). GitHub Actions tests, builds and publishes the universal community ZIP, installation instructions and checksums. Ordinary commits do not publish releases. Complete the outstanding live checks in the validation report, plus Spotify library and overnight sleep/wake acceptance checks, before publishing this version.
 
 Follow the [release checklist](docs/UPDATES.md), including how to check build failures. No paid Apple Developer account is needed for community releases. The optional `release.sh` supports notarized releases when you have the required Apple credentials.
 
